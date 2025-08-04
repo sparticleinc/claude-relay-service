@@ -102,7 +102,7 @@ jobs:
 aws ecr create-repository \
   --repository-name claude-relay-service \
   --image-scanning-configuration scanOnPush=true \
-  --region us-west-2
+  --region ap-northeast-1
 
 # 获取仓库URI
 aws ecr describe-repositories \
@@ -151,7 +151,7 @@ on:
   workflow_dispatch:
 
 env:
-  AWS_REGION: us-west-2
+  AWS_REGION: ap-northeast-1
   ECR_REPOSITORY: claude-relay-service
 
 jobs:
@@ -211,7 +211,7 @@ services:
 
 部署前登录ECR：
 ```bash
-aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin $ECR_REGISTRY
+aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin $ECR_REGISTRY
 ```
 
 ## 🔄 版本管理策略

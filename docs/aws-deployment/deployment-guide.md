@@ -14,7 +14,7 @@
 ### 1. 创建EC2实例
 
 在AWS控制台：
-1. 选择区域：**美西（us-west-2）或美东（us-east-1）**
+1. 选择区域：**亚太东京（ap-northeast-1）**
 2. 启动实例：
    - AMI：**Amazon Linux 2023**
    - 实例类型：**t3.medium**（2核4G）
