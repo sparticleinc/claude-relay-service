@@ -242,3 +242,6 @@ docs/aws-deployment/.secrets
 docs/aws-deployment/*.pem
 docs/aws-deployment/.env.local
 docs/aws-deployment/.aws/
+docs/aws-deployment/weekly-update-guide.md
+
+update-service.sh
