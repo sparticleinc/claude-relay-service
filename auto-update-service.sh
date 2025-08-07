@@ -71,8 +71,22 @@ podman build -t gptbasesparticle/claude-relay-service:v$VERSION -t gptbasesparti
 log "推送镜像到 Docker Hub..."
 # 确保已登录
 if ! podman login docker.io --get-login >/dev/null 2>&1; then
-    log "错误：未登录 Docker Hub，请先运行 'podman login docker.io'"
-    exit 1
+    # 检查环境变量
+    if [ -z "$DOCKER_HUB_TOKEN" ] || [ -z "$DOCKER_HUB_USERNAME" ]; then
+        log "错误：未设置 DOCKER_HUB_TOKEN 或 DOCKER_HUB_USERNAME 环境变量"
+        log "请设置环境变量后重试："
+        log "  export DOCKER_HUB_USERNAME=your-username"
+        log "  export DOCKER_HUB_TOKEN=your-token"
+        exit 1
+    fi
+    
+    log "使用环境变量登录 Docker Hub..."
+    echo "$DOCKER_HUB_TOKEN" | podman login docker.io -u "$DOCKER_HUB_USERNAME" --password-stdin >> "$LOG_FILE" 2>&1
+    
+    if [ $? -ne 0 ]; then
+        log "错误：Docker Hub 登录失败"
+        exit 1
+    fi
 fi
 
 podman push gptbasesparticle/claude-relay-service:v$VERSION >> "$LOG_FILE" 2>&1

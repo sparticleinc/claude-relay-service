@@ -245,3 +245,4 @@ docs/aws-deployment/.aws/
 docs/aws-deployment/weekly-update-guide.md
 
 update-service.sh
+.env.local
