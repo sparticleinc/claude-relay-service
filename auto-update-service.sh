@@ -5,6 +5,12 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# 加载环境变量文件
+ENV_FILE="$SCRIPT_DIR/.env.local"
+if [ -f "$ENV_FILE" ]; then
+    source "$ENV_FILE"
+fi
+
 # 日志文件（在项目目录的 logs 子目录）
 mkdir -p logs
 LOG_FILE="$SCRIPT_DIR/logs/auto-update.log"
@@ -33,6 +39,20 @@ cleanup() {
 trap cleanup EXIT
 
 log "===== 开始自动更新检查 ====="
+
+# 检查环境变量是否加载
+if [ -f "$ENV_FILE" ]; then
+    log "已加载环境变量文件: $ENV_FILE"
+else
+    log "警告：未找到环境变量文件: $ENV_FILE"
+fi
+
+# 验证必需的环境变量
+if [ -n "$DOCKER_HUB_USERNAME" ] && [ -n "$DOCKER_HUB_TOKEN" ]; then
+    log "Docker Hub 认证信息已配置"
+else
+    log "警告：Docker Hub 认证信息未配置"
+fi
 
 # 设置 git 配置以避免交互提示
 export GIT_MERGE_AUTOEDIT=no
@@ -70,7 +90,7 @@ podman build -t gptbasesparticle/claude-relay-service:v$VERSION -t gptbasesparti
 # 5. 推送到 Docker Hub
 log "推送镜像到 Docker Hub..."
 # 确保已登录
-if ! podman login docker.io --get-login >/dev/null 2>&1; then
+if ! podman login --get-login docker.io >/dev/null 2>&1; then
     # 检查环境变量
     if [ -z "$DOCKER_HUB_TOKEN" ] || [ -z "$DOCKER_HUB_USERNAME" ]; then
         log "错误：未设置 DOCKER_HUB_TOKEN 或 DOCKER_HUB_USERNAME 环境变量"
