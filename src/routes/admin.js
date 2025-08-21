@@ -18,8 +18,7 @@ const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
 const config = require('../../config/config')
-const { SocksProxyAgent } = require('socks-proxy-agent')
-const { HttpsProxyAgent } = require('https-proxy-agent')
+const ProxyHelper = require('../utils/proxyHelper')
 
 const router = express.Router()
 
@@ -799,7 +798,105 @@ router.put('/api-keys/:keyId', authenticateAdmin, async (req, res) => {
   }
 })
 
-// 删除API Key
+// 批量删除API Keys（必须在 :keyId 路由之前定义）
+router.delete('/api-keys/batch', authenticateAdmin, async (req, res) => {
+  try {
+    const { keyIds } = req.body
+
+    // 调试信息
+    logger.info(`🐛 Batch delete request body: ${JSON.stringify(req.body)}`)
+    logger.info(`🐛 keyIds type: ${typeof keyIds}, value: ${JSON.stringify(keyIds)}`)
+
+    // 参数验证
+    if (!keyIds || !Array.isArray(keyIds) || keyIds.length === 0) {
+      logger.warn(
+        `🚨 Invalid keyIds: ${JSON.stringify({ keyIds, type: typeof keyIds, isArray: Array.isArray(keyIds) })}`
+      )
+      return res.status(400).json({
+        error: 'Invalid request',
+        message: 'keyIds 必须是一个非空数组'
+      })
+    }
+
+    if (keyIds.length > 100) {
+      return res.status(400).json({
+        error: 'Too many keys',
+        message: '每次最多只能删除100个API Keys'
+      })
+    }
+
+    // 验证keyIds格式
+    const invalidKeys = keyIds.filter((id) => !id || typeof id !== 'string')
+    if (invalidKeys.length > 0) {
+      return res.status(400).json({
+        error: 'Invalid key IDs',
+        message: '包含无效的API Key ID'
+      })
+    }
+
+    logger.info(
+      `🗑️ Admin attempting batch delete of ${keyIds.length} API keys: ${JSON.stringify(keyIds)}`
+    )
+
+    const results = {
+      successCount: 0,
+      failedCount: 0,
+      errors: []
+    }
+
+    // 逐个删除，记录成功和失败情况
+    for (const keyId of keyIds) {
+      try {
+        // 检查API Key是否存在
+        const apiKey = await redis.getApiKey(keyId)
+        if (!apiKey || Object.keys(apiKey).length === 0) {
+          results.failedCount++
+          results.errors.push({ keyId, error: 'API Key 不存在' })
+          continue
+        }
+
+        // 执行删除
+        await apiKeyService.deleteApiKey(keyId)
+        results.successCount++
+
+        logger.success(`✅ Batch delete: API key ${keyId} deleted successfully`)
+      } catch (error) {
+        results.failedCount++
+        results.errors.push({
+          keyId,
+          error: error.message || '删除失败'
+        })
+
+        logger.error(`❌ Batch delete failed for key ${keyId}:`, error)
+      }
+    }
+
+    // 记录批量删除结果
+    if (results.successCount > 0) {
+      logger.success(
+        `🎉 Batch delete completed: ${results.successCount} successful, ${results.failedCount} failed`
+      )
+    } else {
+      logger.warn(
+        `⚠️ Batch delete completed with no successful deletions: ${results.failedCount} failed`
+      )
+    }
+
+    return res.json({
+      success: true,
+      message: `批量删除完成`,
+      data: results
+    })
+  } catch (error) {
+    logger.error('❌ Failed to batch delete API keys:', error)
+    return res.status(500).json({
+      error: 'Batch delete failed',
+      message: error.message
+    })
+  }
+})
+
+// 删除单个API Key（必须在批量删除路由之后定义）
 router.delete('/api-keys/:keyId', authenticateAdmin, async (req, res) => {
   try {
     const { keyId } = req.params
@@ -1242,6 +1339,7 @@ router.post('/claude-accounts', authenticateAdmin, async (req, res) => {
       claudeAiOauth,
       proxy,
       accountType,
+      platform = 'claude',
       priority,
       groupId
     } = req.body
@@ -1279,6 +1377,7 @@ router.post('/claude-accounts', authenticateAdmin, async (req, res) => {
       claudeAiOauth,
       proxy,
       accountType: accountType || 'shared', // 默认为共享类型
+      platform,
       priority: priority || 50 // 默认优先级为50
     })
 
@@ -2053,7 +2152,7 @@ router.post('/bedrock-accounts/:accountId/test', authenticateAdmin, async (req, 
 // 生成 Gemini OAuth 授权 URL
 router.post('/gemini-accounts/generate-auth-url', authenticateAdmin, async (req, res) => {
   try {
-    const { state } = req.body
+    const { state, proxy } = req.body // 接收代理配置
 
     // 使用新的 codeassist.google.com 回调地址
     const redirectUri = 'https://codeassist.google.com/authcode'
@@ -2067,13 +2166,14 @@ router.post('/gemini-accounts/generate-auth-url', authenticateAdmin, async (req,
       redirectUri: finalRedirectUri
     } = await geminiAccountService.generateAuthUrl(state, redirectUri)
 
-    // 创建 OAuth 会话，包含 codeVerifier
+    // 创建 OAuth 会话，包含 codeVerifier 和代理配置
     const sessionId = authState
     await redis.setOAuthSession(sessionId, {
       state: authState,
       type: 'gemini',
       redirectUri: finalRedirectUri,
       codeVerifier, // 保存 PKCE code verifier
+      proxy: proxy || null, // 保存代理配置
       createdAt: new Date().toISOString()
     })
 
@@ -2117,7 +2217,7 @@ router.post('/gemini-accounts/poll-auth-status', authenticateAdmin, async (req, 
 // 交换 Gemini 授权码
 router.post('/gemini-accounts/exchange-code', authenticateAdmin, async (req, res) => {
   try {
-    const { code, sessionId } = req.body
+    const { code, sessionId, proxy: requestProxy } = req.body
 
     if (!code) {
       return res.status(400).json({ error: 'Authorization code is required' })
@@ -2125,21 +2225,40 @@ router.post('/gemini-accounts/exchange-code', authenticateAdmin, async (req, res
 
     let redirectUri = 'https://codeassist.google.com/authcode'
     let codeVerifier = null
+    let proxyConfig = null
 
     // 如果提供了 sessionId，从 OAuth 会话中获取信息
     if (sessionId) {
       const sessionData = await redis.getOAuthSession(sessionId)
       if (sessionData) {
-        const { redirectUri: sessionRedirectUri, codeVerifier: sessionCodeVerifier } = sessionData
+        const {
+          redirectUri: sessionRedirectUri,
+          codeVerifier: sessionCodeVerifier,
+          proxy
+        } = sessionData
         redirectUri = sessionRedirectUri || redirectUri
         codeVerifier = sessionCodeVerifier
+        proxyConfig = proxy // 获取代理配置
         logger.info(
-          `Using session redirect_uri: ${redirectUri}, has codeVerifier: ${!!codeVerifier}`
+          `Using session redirect_uri: ${redirectUri}, has codeVerifier: ${!!codeVerifier}, has proxy from session: ${!!proxyConfig}`
         )
       }
     }
 
-    const tokens = await geminiAccountService.exchangeCodeForTokens(code, redirectUri, codeVerifier)
+    // 如果请求体中直接提供了代理配置，优先使用它
+    if (requestProxy) {
+      proxyConfig = requestProxy
+      logger.info(
+        `Using proxy from request body: ${proxyConfig ? JSON.stringify(proxyConfig) : 'none'}`
+      )
+    }
+
+    const tokens = await geminiAccountService.exchangeCodeForTokens(
+      code,
+      redirectUri,
+      codeVerifier,
+      proxyConfig // 传递代理配置
+    )
 
     // 清理 OAuth 会话
     if (sessionId) {
@@ -4549,19 +4668,10 @@ router.post('/openai-accounts/exchange-code', authenticateAdmin, async (req, res
       }
     }
 
-    if (sessionData.proxy) {
-      const { type, host, port, username, password } = sessionData.proxy
-      if (type === 'socks5') {
-        // SOCKS5 代理
-        const auth = username && password ? `${username}:${password}@` : ''
-        const socksUrl = `socks5://${auth}${host}:${port}`
-        axiosConfig.httpsAgent = new SocksProxyAgent(socksUrl)
-      } else if (type === 'http' || type === 'https') {
-        // HTTP/HTTPS 代理
-        const auth = username && password ? `${username}:${password}@` : ''
-        const proxyUrl = `${type}://${auth}${host}:${port}`
-        axiosConfig.httpsAgent = new HttpsProxyAgent(proxyUrl)
-      }
+    // 配置代理（如果有）
+    const proxyAgent = ProxyHelper.createProxyAgent(sessionData.proxy)
+    if (proxyAgent) {
+      axiosConfig.httpsAgent = proxyAgent
     }
 
     // 交换 authorization code 获取 tokens
