@@ -621,10 +621,7 @@ class ClaudeAccountService {
     try {
       // 首先从所有分组中移除此账户
       const accountGroupService = require('./accountGroupService')
-      const groups = await accountGroupService.getAccountGroup(accountId)
-      for (const group of groups) {
-        await accountGroupService.removeAccountFromGroup(accountId, group.id)
-      }
+      await accountGroupService.removeAccountFromAllGroups(accountId)
 
       const result = await redis.deleteClaudeAccount(accountId)
 
@@ -1769,6 +1766,9 @@ class ClaudeAccountService {
       delete updatedAccountData.rateLimitedAt
       delete updatedAccountData.rateLimitStatus
       delete updatedAccountData.rateLimitEndAt
+      delete updatedAccountData.tempErrorAt
+      delete updatedAccountData.sessionWindowStart
+      delete updatedAccountData.sessionWindowEnd
 
       // 保存更新后的账户数据
       await redis.setClaudeAccount(accountId, updatedAccountData)
@@ -1780,6 +1780,10 @@ class ClaudeAccountService {
       // 清除限流状态（如果存在）
       const rateLimitKey = `ratelimit:${accountId}`
       await redis.client.del(rateLimitKey)
+
+      // 清除5xx错误计数
+      const serverErrorKey = `claude_account:${accountId}:5xx_errors`
+      await redis.client.del(serverErrorKey)
 
       logger.info(
         `✅ Successfully reset all error states for account ${accountData.name} (${accountId})`
@@ -1805,7 +1809,7 @@ class ClaudeAccountService {
     try {
       const accounts = await redis.getAllClaudeAccounts()
       let cleanedCount = 0
-      const TEMP_ERROR_RECOVERY_MINUTES = 60 // 临时错误状态恢复时间（分钟）
+      const TEMP_ERROR_RECOVERY_MINUTES = 5 // 临时错误状态恢复时间（分钟）
 
       for (const account of accounts) {
         if (account.status === 'temp_error' && account.tempErrorAt) {
