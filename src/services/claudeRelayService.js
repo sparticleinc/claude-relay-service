@@ -12,6 +12,9 @@ const claudeCodeHeadersService = require('./claudeCodeHeadersService')
 const redis = require('../models/redis')
 const ClaudeCodeValidator = require('../validators/clients/claudeCodeValidator')
 const { formatDateWithTimezone } = require('../utils/dateHelper')
+const runtimeAddon = require('../utils/runtimeAddon')
+
+const RUNTIME_EVENT_FMT_CLAUDE_REQ = 'fmtClaudeReq'
 
 class ClaudeRelayService {
   constructor() {
@@ -38,9 +41,60 @@ class ClaudeRelayService {
     return `此专属账号的Opus模型已达到周使用限制，将于 ${formattedReset} 自动恢复，请尝试切换其他模型后再试。`
   }
 
+  // 🧾 提取错误消息文本
+  _extractErrorMessage(body) {
+    if (!body) {
+      return ''
+    }
+
+    if (typeof body === 'string') {
+      const trimmed = body.trim()
+      if (!trimmed) {
+        return ''
+      }
+      try {
+        const parsed = JSON.parse(trimmed)
+        return this._extractErrorMessage(parsed)
+      } catch (error) {
+        return trimmed
+      }
+    }
+
+    if (typeof body === 'object') {
+      if (typeof body.error === 'string') {
+        return body.error
+      }
+      if (body.error && typeof body.error === 'object') {
+        if (typeof body.error.message === 'string') {
+          return body.error.message
+        }
+        if (typeof body.error.error === 'string') {
+          return body.error.error
+        }
+      }
+      if (typeof body.message === 'string') {
+        return body.message
+      }
+    }
+
+    return ''
+  }
+
+  // 🚫 检查是否为组织被禁用错误
+  _isOrganizationDisabledError(statusCode, body) {
+    if (statusCode !== 400) {
+      return false
+    }
+    const message = this._extractErrorMessage(body)
+    if (!message) {
+      return false
+    }
+    return message.toLowerCase().includes('this organization has been disabled')
+  }
+
   // 🔍 判断是否是真实的 Claude Code 请求
   isRealClaudeCodeRequest(requestBody) {
-    return ClaudeCodeValidator.hasClaudeCodeSystemPrompt(requestBody)
+    return ClaudeCodeValidator.includesClaudeCodeSystemPrompt(requestBody, 1)
   }
 
   // 🚀 转发请求到Claude API
@@ -176,6 +230,9 @@ class ClaudeRelayService {
         options
       )
 
+      response.accountId = accountId
+      response.accountType = accountType
+
       // 移除监听器（请求成功完成）
       if (clientRequest) {
         clientRequest.removeListener('close', handleClientDisconnect)
@@ -189,6 +246,10 @@ class ClaudeRelayService {
         let isRateLimited = false
         let rateLimitResetTimestamp = null
         let dedicatedRateLimitMessage = null
+        const organizationDisabledError = this._isOrganizationDisabledError(
+          response.statusCode,
+          response.body
+        )
 
         // 检查是否为401状态码（未授权）
         if (response.statusCode === 401) {
@@ -218,6 +279,13 @@ class ClaudeRelayService {
         else if (response.statusCode === 403) {
           logger.error(
             `🚫 Forbidden error (403) detected for account ${accountId}, marking as blocked`
+          )
+          await unifiedClaudeScheduler.markAccountBlocked(accountId, accountType, sessionHash)
+        }
+        // 检查是否返回组织被禁用错误（400状态码）
+        else if (organizationDisabledError) {
+          logger.error(
+            `🚫 Organization disabled error (400) detected for account ${accountId}, marking as blocked`
           )
           await unifiedClaudeScheduler.markAccountBlocked(accountId, accountType, sessionHash)
         }
@@ -499,6 +567,8 @@ class ClaudeRelayService {
       }
     }
 
+    this._enforceCacheControlLimit(processedBody)
+
     // 处理原有的系统提示（如果配置了）
     if (this.systemPrompt && this.systemPrompt.trim()) {
       const systemPrompt = {
@@ -645,6 +715,107 @@ class ClaudeRelayService {
     }
   }
 
+  // ⚖️ 限制带缓存控制的内容数量
+  _enforceCacheControlLimit(body) {
+    const MAX_CACHE_CONTROL_BLOCKS = 4
+
+    if (!body || typeof body !== 'object') {
+      return
+    }
+
+    const countCacheControlBlocks = () => {
+      let total = 0
+
+      if (Array.isArray(body.messages)) {
+        body.messages.forEach((message) => {
+          if (!message || !Array.isArray(message.content)) {
+            return
+          }
+          message.content.forEach((item) => {
+            if (item && item.cache_control) {
+              total += 1
+            }
+          })
+        })
+      }
+
+      if (Array.isArray(body.system)) {
+        body.system.forEach((item) => {
+          if (item && item.cache_control) {
+            total += 1
+          }
+        })
+      }
+
+      return total
+    }
+
+    const removeFromMessages = () => {
+      if (!Array.isArray(body.messages)) {
+        return false
+      }
+
+      for (let messageIndex = 0; messageIndex < body.messages.length; messageIndex += 1) {
+        const message = body.messages[messageIndex]
+        if (!message || !Array.isArray(message.content)) {
+          continue
+        }
+
+        for (let contentIndex = 0; contentIndex < message.content.length; contentIndex += 1) {
+          const contentItem = message.content[contentIndex]
+          if (contentItem && contentItem.cache_control) {
+            message.content.splice(contentIndex, 1)
+
+            if (message.content.length === 0) {
+              body.messages.splice(messageIndex, 1)
+            }
+
+            return true
+          }
+        }
+      }
+
+      return false
+    }
+
+    const removeFromSystem = () => {
+      if (!Array.isArray(body.system)) {
+        return false
+      }
+
+      for (let index = 0; index < body.system.length; index += 1) {
+        const systemItem = body.system[index]
+        if (systemItem && systemItem.cache_control) {
+          body.system.splice(index, 1)
+
+          if (body.system.length === 0) {
+            delete body.system
+          }
+
+          return true
+        }
+      }
+
+      return false
+    }
+
+    let total = countCacheControlBlocks()
+
+    while (total > MAX_CACHE_CONTROL_BLOCKS) {
+      if (removeFromMessages()) {
+        total -= 1
+        continue
+      }
+
+      if (removeFromSystem()) {
+        total -= 1
+        continue
+      }
+
+      break
+    }
+  }
+
   // 🌐 获取代理Agent（使用统一的代理工具）
   async _getProxyAgent(accountId) {
     try {
@@ -728,6 +899,36 @@ class ClaudeRelayService {
     return filteredHeaders
   }
 
+  _applyLocalRequestFormatters(body, headers, context = {}) {
+    const normalizedHeaders = headers && typeof headers === 'object' ? { ...headers } : {}
+
+    try {
+      const payload = {
+        body,
+        headers: normalizedHeaders,
+        ...context
+      }
+
+      const result = runtimeAddon.emitSync(RUNTIME_EVENT_FMT_CLAUDE_REQ, payload)
+      if (!result || typeof result !== 'object') {
+        return { body, headers: normalizedHeaders }
+      }
+
+      const nextBody = result.body && typeof result.body === 'object' ? result.body : body
+      const nextHeaders =
+        result.headers && typeof result.headers === 'object' ? result.headers : normalizedHeaders
+      const abortResponse =
+        result.abortResponse && typeof result.abortResponse === 'object'
+          ? result.abortResponse
+          : null
+
+      return { body: nextBody, headers: nextHeaders, abortResponse }
+    } catch (error) {
+      logger.warn('⚠️ 应用本地 fmtClaudeReq 插件失败:', error)
+      return { body, headers: normalizedHeaders }
+    }
+  }
+
   // 🔗 发送请求到Claude API
   async _makeClaudeRequest(
     body,
@@ -753,7 +954,8 @@ class ClaudeRelayService {
     const isRealClaudeCode = this.isRealClaudeCodeRequest(body)
 
     // 如果不是真实的 Claude Code 请求，需要使用从账户获取的 Claude Code headers
-    const finalHeaders = { ...filteredHeaders }
+    let finalHeaders = { ...filteredHeaders }
+    let requestPayload = body
 
     if (!isRealClaudeCode) {
       // 获取该账号存储的 Claude Code headers
@@ -767,6 +969,21 @@ class ClaudeRelayService {
         }
       })
     }
+
+    const extensionResult = this._applyLocalRequestFormatters(requestPayload, finalHeaders, {
+      account,
+      accountId,
+      clientHeaders,
+      requestOptions,
+      isStream: false
+    })
+
+    if (extensionResult.abortResponse) {
+      return extensionResult.abortResponse
+    }
+
+    requestPayload = extensionResult.body
+    finalHeaders = extensionResult.headers
 
     return new Promise((resolve, reject) => {
       // 支持自定义路径（如 count_tokens）
@@ -896,7 +1113,7 @@ class ClaudeRelayService {
       })
 
       // 写入请求体
-      req.write(JSON.stringify(body))
+      req.write(JSON.stringify(requestPayload))
       req.end()
     })
   }
@@ -1057,7 +1274,8 @@ class ClaudeRelayService {
     const isRealClaudeCode = this.isRealClaudeCodeRequest(body)
 
     // 如果不是真实的 Claude Code 请求，需要使用从账户获取的 Claude Code headers
-    const finalHeaders = { ...filteredHeaders }
+    let finalHeaders = { ...filteredHeaders }
+    let requestPayload = body
 
     if (!isRealClaudeCode) {
       // 获取该账号存储的 Claude Code headers
@@ -1071,6 +1289,23 @@ class ClaudeRelayService {
         }
       })
     }
+
+    const extensionResult = this._applyLocalRequestFormatters(requestPayload, finalHeaders, {
+      account,
+      accountId,
+      accountType,
+      sessionHash,
+      clientHeaders,
+      requestOptions,
+      isStream: true
+    })
+
+    if (extensionResult.abortResponse) {
+      return extensionResult.abortResponse
+    }
+
+    requestPayload = extensionResult.body
+    finalHeaders = extensionResult.headers
 
     return new Promise((resolve, reject) => {
       const url = new URL(this.claudeApiUrl)
@@ -1253,6 +1488,25 @@ class ClaudeRelayService {
               `❌ Claude API error response (Account: ${account?.name || accountId}):`,
               errorData
             )
+            if (this._isOrganizationDisabledError(res.statusCode, errorData)) {
+              ;(async () => {
+                try {
+                  logger.error(
+                    `🚫 [Stream] Organization disabled error (400) detected for account ${accountId}, marking as blocked`
+                  )
+                  await unifiedClaudeScheduler.markAccountBlocked(
+                    accountId,
+                    accountType,
+                    sessionHash
+                  )
+                } catch (markError) {
+                  logger.error(
+                    `❌ [Stream] Failed to mark account ${accountId} as blocked after organization disabled error:`,
+                    markError
+                  )
+                }
+              })()
+            }
             if (!responseStream.destroyed) {
               // 发送错误事件
               responseStream.write('event: error\n')
@@ -1303,9 +1557,12 @@ class ClaudeRelayService {
 
             for (const line of lines) {
               // 解析SSE数据寻找usage信息
-              if (line.startsWith('data: ') && line.length > 6) {
+              if (line.startsWith('data:')) {
+                const jsonStr = line.slice(5).trimStart()
+                if (!jsonStr || jsonStr === '[DONE]') {
+                  continue
+                }
                 try {
-                  const jsonStr = line.slice(6)
                   const data = JSON.parse(jsonStr)
 
                   // 收集来自不同事件的usage数据
@@ -1681,157 +1938,7 @@ class ClaudeRelayService {
       })
 
       // 写入请求体
-      req.write(JSON.stringify(body))
-      req.end()
-    })
-  }
-
-  // 🌊 发送流式请求到Claude API
-  async _makeClaudeStreamRequest(
-    body,
-    accessToken,
-    proxyAgent,
-    clientHeaders,
-    responseStream,
-    requestOptions = {}
-  ) {
-    return new Promise((resolve, reject) => {
-      const url = new URL(this.claudeApiUrl)
-
-      // 获取过滤后的客户端 headers
-      const filteredHeaders = this._filterClientHeaders(clientHeaders)
-
-      const options = {
-        hostname: url.hostname,
-        port: url.port || 443,
-        path: url.pathname,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${accessToken}`,
-          'anthropic-version': this.apiVersion,
-          ...filteredHeaders
-        },
-        agent: proxyAgent,
-        timeout: config.requestTimeout || 600000
-      }
-
-      // 如果客户端没有提供 User-Agent，使用默认值
-      if (!filteredHeaders['User-Agent'] && !filteredHeaders['user-agent']) {
-        // 第三个方法不支持统一 User-Agent，使用简化逻辑
-        const userAgent =
-          clientHeaders?.['user-agent'] ||
-          clientHeaders?.['User-Agent'] ||
-          'claude-cli/1.0.102 (external, cli)'
-        options.headers['User-Agent'] = userAgent
-      }
-
-      // 使用自定义的 betaHeader 或默认值
-      const betaHeader =
-        requestOptions?.betaHeader !== undefined ? requestOptions.betaHeader : this.betaHeader
-      if (betaHeader) {
-        options.headers['anthropic-beta'] = betaHeader
-      }
-
-      const req = https.request(options, (res) => {
-        // 设置响应头
-        responseStream.statusCode = res.statusCode
-        Object.keys(res.headers).forEach((key) => {
-          responseStream.setHeader(key, res.headers[key])
-        })
-
-        // 管道响应数据
-        res.pipe(responseStream)
-
-        res.on('end', () => {
-          logger.debug('🌊 Claude stream response completed')
-          resolve()
-        })
-      })
-
-      req.on('error', async (error) => {
-        logger.error(`❌ Claude stream request error:`, error.message, {
-          code: error.code,
-          errno: error.errno,
-          syscall: error.syscall
-        })
-
-        // 根据错误类型提供更具体的错误信息
-        let errorMessage = 'Upstream request failed'
-        let statusCode = 500
-        if (error.code === 'ECONNRESET') {
-          errorMessage = 'Connection reset by Claude API server'
-          statusCode = 502
-        } else if (error.code === 'ENOTFOUND') {
-          errorMessage = 'Unable to resolve Claude API hostname'
-          statusCode = 502
-        } else if (error.code === 'ECONNREFUSED') {
-          errorMessage = 'Connection refused by Claude API server'
-          statusCode = 502
-        } else if (error.code === 'ETIMEDOUT') {
-          errorMessage = 'Connection timed out to Claude API server'
-          statusCode = 504
-        }
-
-        if (!responseStream.headersSent) {
-          responseStream.writeHead(statusCode, {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            Connection: 'keep-alive'
-          })
-        }
-
-        if (!responseStream.destroyed) {
-          // 发送 SSE 错误事件
-          responseStream.write('event: error\n')
-          responseStream.write(
-            `data: ${JSON.stringify({
-              error: errorMessage,
-              code: error.code,
-              timestamp: new Date().toISOString()
-            })}\n\n`
-          )
-          responseStream.end()
-        }
-        reject(error)
-      })
-
-      req.on('timeout', async () => {
-        req.destroy()
-        logger.error(`❌ Claude stream request timeout`)
-
-        if (!responseStream.headersSent) {
-          responseStream.writeHead(504, {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            Connection: 'keep-alive'
-          })
-        }
-        if (!responseStream.destroyed) {
-          // 发送 SSE 错误事件
-          responseStream.write('event: error\n')
-          responseStream.write(
-            `data: ${JSON.stringify({
-              error: 'Request timeout',
-              code: 'TIMEOUT',
-              timestamp: new Date().toISOString()
-            })}\n\n`
-          )
-          responseStream.end()
-        }
-        reject(new Error('Request timeout'))
-      })
-
-      // 处理客户端断开连接
-      responseStream.on('close', () => {
-        logger.debug('🔌 Client disconnected, cleaning up stream')
-        if (!req.destroyed) {
-          req.destroy()
-        }
-      })
-
-      // 写入请求体
-      req.write(JSON.stringify(body))
+      req.write(JSON.stringify(requestPayload))
       req.end()
     })
   }

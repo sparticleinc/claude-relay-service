@@ -511,6 +511,18 @@
                               {{ getBedrockBindingInfo(key) }}
                             </span>
                           </div>
+                          <!-- Droid 绑定 -->
+                          <div v-if="key.droidAccountId" class="flex items-center gap-1 text-xs">
+                            <span
+                              class="inline-flex items-center rounded bg-cyan-100 px-1.5 py-0.5 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300"
+                            >
+                              <i class="fas fa-robot mr-1 text-[10px]" />
+                              Droid
+                            </span>
+                            <span class="truncate text-gray-600 dark:text-gray-400">
+                              {{ getDroidBindingInfo(key) }}
+                            </span>
+                          </div>
                           <!-- 共享池 -->
                           <div
                             v-if="
@@ -518,7 +530,8 @@
                               !key.claudeConsoleAccountId &&
                               !key.geminiAccountId &&
                               !key.openaiAccountId &&
-                              !key.bedrockAccountId
+                              !key.bedrockAccountId &&
+                              !key.droidAccountId
                             "
                             class="text-xs text-gray-500 dark:text-gray-400"
                           >
@@ -594,6 +607,47 @@
                             variant="compact"
                           />
 
+                          <!-- 时间窗口费用限制（无每日和总费用限制时展示） -->
+                          <div
+                            v-else-if="
+                              key.rateLimitWindow > 0 &&
+                              key.rateLimitCost > 0 &&
+                              (!key.dailyCostLimit || key.dailyCostLimit === 0) &&
+                              (!key.totalCostLimit || key.totalCostLimit === 0)
+                            "
+                            class="space-y-1.5"
+                          >
+                            <!-- 费用进度条 -->
+                            <LimitProgressBar
+                              :current="key.currentWindowCost || 0"
+                              label="窗口费用"
+                              :limit="key.rateLimitCost"
+                              type="window"
+                              variant="compact"
+                            />
+                            <!-- 重置倒计时 -->
+                            <div class="flex items-center justify-between text-[10px]">
+                              <div class="flex items-center gap-1 text-sky-600 dark:text-sky-300">
+                                <i class="fas fa-clock text-[10px]" />
+                                <span class="font-medium">{{ key.rateLimitWindow }}分钟窗口</span>
+                              </div>
+                              <span
+                                class="font-bold"
+                                :class="
+                                  key.windowRemainingSeconds > 0
+                                    ? 'text-sky-700 dark:text-sky-300'
+                                    : 'text-gray-400 dark:text-gray-500'
+                                "
+                              >
+                                {{
+                                  key.windowRemainingSeconds > 0
+                                    ? formatWindowTime(key.windowRemainingSeconds)
+                                    : '未激活'
+                                }}
+                              </span>
+                            </div>
+                          </div>
+
                           <!-- 如果没有任何限制 -->
                           <div
                             v-else
@@ -632,15 +686,33 @@
                         class="whitespace-nowrap px-3 py-3 text-gray-700 dark:text-gray-300"
                         style="font-size: 13px"
                       >
-                        <span
-                          v-if="key.lastUsedAt"
-                          class="cursor-help"
-                          style="font-size: 13px"
-                          :title="new Date(key.lastUsedAt).toLocaleString('zh-CN')"
-                        >
-                          {{ formatLastUsed(key.lastUsedAt) }}
-                        </span>
-                        <span v-else class="text-gray-400" style="font-size: 13px">从未使用</span>
+                        <div class="flex flex-col leading-tight">
+                          <span
+                            v-if="key.lastUsedAt"
+                            class="cursor-help"
+                            style="font-size: 13px"
+                            :title="new Date(key.lastUsedAt).toLocaleString('zh-CN')"
+                          >
+                            {{ formatLastUsed(key.lastUsedAt) }}
+                          </span>
+                          <span v-else class="text-gray-400" style="font-size: 13px">从未使用</span>
+                          <span
+                            v-if="hasLastUsageAccount(key)"
+                            class="mt-1 text-xs text-gray-500 dark:text-gray-400"
+                            :title="getLastUsageFullName(key)"
+                          >
+                            {{ getLastUsageDisplayName(key) }}
+                            <span
+                              v-if="!isLastUsageDeleted(key)"
+                              class="ml-1 text-gray-400 dark:text-gray-500"
+                            >
+                              ({{ getLastUsageTypeLabel(key) }})
+                            </span>
+                          </span>
+                          <span v-else class="mt-1 text-xs text-gray-400 dark:text-gray-500">
+                            暂无使用账号
+                          </span>
+                        </div>
                       </td>
                       <!-- 创建时间 -->
                       <td
@@ -1141,6 +1213,18 @@
                     {{ getBedrockBindingInfo(key) }}
                   </span>
                 </div>
+                <!-- Droid 绑定 -->
+                <div v-if="key.droidAccountId" class="flex flex-wrap items-center gap-1 text-xs">
+                  <span
+                    class="inline-flex items-center rounded bg-cyan-100 px-2 py-0.5 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300"
+                  >
+                    <i class="fas fa-robot mr-1" />
+                    Droid
+                  </span>
+                  <span class="text-gray-600 dark:text-gray-400">
+                    {{ getDroidBindingInfo(key) }}
+                  </span>
+                </div>
                 <!-- 无绑定时显示共享池 -->
                 <div
                   v-if="
@@ -1148,7 +1232,8 @@
                     !key.claudeConsoleAccountId &&
                     !key.geminiAccountId &&
                     !key.openaiAccountId &&
-                    !key.bedrockAccountId
+                    !key.bedrockAccountId &&
+                    !key.droidAccountId
                   "
                   class="text-xs text-gray-500 dark:text-gray-400"
                 >
@@ -1191,11 +1276,31 @@
                       <p class="text-xs text-gray-500 dark:text-gray-400">费用</p>
                     </div>
                   </div>
-                  <div class="mt-2 flex items-center justify-between">
-                    <span class="text-xs text-gray-600 dark:text-gray-400">最后使用</span>
-                    <span class="text-xs font-medium text-gray-700 dark:text-gray-300">{{
-                      formatLastUsed(key.lastUsedAt)
-                    }}</span>
+                  <div class="mt-2 text-xs text-gray-600 dark:text-gray-400">
+                    <div class="flex items-center justify-between">
+                      <span>最后使用</span>
+                      <span class="font-medium text-gray-700 dark:text-gray-300">
+                        {{ key.lastUsedAt ? formatLastUsed(key.lastUsedAt) : '从未使用' }}
+                      </span>
+                    </div>
+                    <div class="mt-1 flex items-center justify-between">
+                      <span>账号</span>
+                      <span
+                        v-if="hasLastUsageAccount(key)"
+                        class="truncate text-gray-500 dark:text-gray-400"
+                        style="max-width: 180px"
+                        :title="getLastUsageFullName(key)"
+                      >
+                        {{ getLastUsageDisplayName(key) }}
+                        <span
+                          v-if="!isLastUsageDeleted(key)"
+                          class="ml-1 text-gray-400 dark:text-gray-500"
+                        >
+                          ({{ getLastUsageTypeLabel(key) }})
+                        </span>
+                      </span>
+                      <span v-else class="text-gray-400 dark:text-gray-500">暂无使用账号</span>
+                    </div>
                   </div>
                 </div>
 
@@ -1220,6 +1325,47 @@
                     type="total"
                     variant="compact"
                   />
+
+                  <!-- 时间窗口费用限制（无每日和总费用限制时展示） -->
+                  <div
+                    v-else-if="
+                      key.rateLimitWindow > 0 &&
+                      key.rateLimitCost > 0 &&
+                      (!key.dailyCostLimit || key.dailyCostLimit === 0) &&
+                      (!key.totalCostLimit || key.totalCostLimit === 0)
+                    "
+                    class="space-y-2"
+                  >
+                    <!-- 费用进度条 -->
+                    <LimitProgressBar
+                      :current="key.currentWindowCost || 0"
+                      label="窗口费用"
+                      :limit="key.rateLimitCost"
+                      type="window"
+                      variant="compact"
+                    />
+                    <!-- 重置倒计时 -->
+                    <div class="flex items-center justify-between text-xs">
+                      <div class="flex items-center gap-1.5 text-sky-600 dark:text-sky-300">
+                        <i class="fas fa-clock text-xs" />
+                        <span class="font-medium">{{ key.rateLimitWindow }}分钟窗口</span>
+                      </div>
+                      <span
+                        class="font-bold"
+                        :class="
+                          key.windowRemainingSeconds > 0
+                            ? 'text-sky-700 dark:text-sky-300'
+                            : 'text-gray-400 dark:text-gray-500'
+                        "
+                      >
+                        {{
+                          key.windowRemainingSeconds > 0
+                            ? formatWindowTime(key.windowRemainingSeconds)
+                            : '未激活'
+                        }}
+                      </span>
+                    </div>
+                  </div>
 
                   <!-- 无限制显示 -->
                   <div
@@ -1657,10 +1803,33 @@
                         class="whitespace-nowrap px-3 py-3 text-gray-700 dark:text-gray-300"
                         style="font-size: 13px"
                       >
-                        <span v-if="key.lastUsedAt" style="font-size: 13px">
-                          {{ formatLastUsed(key.lastUsedAt) }}
-                        </span>
-                        <span v-else class="text-gray-400" style="font-size: 13px">从未使用</span>
+                        <div class="flex flex-col leading-tight">
+                          <span
+                            v-if="key.lastUsedAt"
+                            class="cursor-help"
+                            style="font-size: 13px"
+                            :title="new Date(key.lastUsedAt).toLocaleString('zh-CN')"
+                          >
+                            {{ formatLastUsed(key.lastUsedAt) }}
+                          </span>
+                          <span v-else class="text-gray-400" style="font-size: 13px">从未使用</span>
+                          <span
+                            v-if="hasLastUsageAccount(key)"
+                            class="mt-1 text-xs text-gray-500 dark:text-gray-400"
+                            :title="getLastUsageFullName(key)"
+                          >
+                            {{ getLastUsageDisplayName(key) }}
+                            <span
+                              v-if="!isLastUsageDeleted(key)"
+                              class="ml-1 text-gray-400 dark:text-gray-500"
+                            >
+                              ({{ getLastUsageTypeLabel(key) }})
+                            </span>
+                          </span>
+                          <span v-else class="mt-1 text-xs text-gray-400 dark:text-gray-500">
+                            暂无使用账号
+                          </span>
+                        </div>
                       </td>
                       <td class="operations-column operations-cell px-3 py-3">
                         <div class="flex items-center gap-2">
@@ -1839,9 +2008,11 @@ const accounts = ref({
   openai: [],
   openaiResponses: [], // 添加 OpenAI-Responses 账号列表
   bedrock: [],
+  droid: [],
   claudeGroups: [],
   geminiGroups: [],
-  openaiGroups: []
+  openaiGroups: [],
+  droidGroups: []
 })
 const editingExpiryKey = ref(null)
 const expiryEditModalRef = ref(null)
@@ -1949,12 +2120,17 @@ const getBindingDisplayStrings = (key) => {
     appendBindingRow('Bedrock', getBedrockBindingInfo(key))
   }
 
+  if (key.droidAccountId) {
+    appendBindingRow('Droid', getDroidBindingInfo(key))
+  }
+
   if (
     !key.claudeAccountId &&
     !key.claudeConsoleAccountId &&
     !key.geminiAccountId &&
     !key.openaiAccountId &&
-    !key.bedrockAccountId
+    !key.bedrockAccountId &&
+    !key.droidAccountId
   ) {
     collect('共享池')
   }
@@ -2114,6 +2290,7 @@ const loadAccounts = async () => {
       openaiData,
       openaiResponsesData,
       bedrockData,
+      droidData,
       groupsData
     ] = await Promise.all([
       apiClient.get('/admin/claude-accounts'),
@@ -2122,6 +2299,7 @@ const loadAccounts = async () => {
       apiClient.get('/admin/openai-accounts'),
       apiClient.get('/admin/openai-responses-accounts'), // 加载 OpenAI-Responses 账号
       apiClient.get('/admin/bedrock-accounts'),
+      apiClient.get('/admin/droid-accounts'),
       apiClient.get('/admin/account-groups')
     ])
 
@@ -2178,12 +2356,21 @@ const loadAccounts = async () => {
       }))
     }
 
+    if (droidData.success) {
+      accounts.value.droid = (droidData.data || []).map((account) => ({
+        ...account,
+        platform: 'droid',
+        isDedicated: account.accountType === 'dedicated'
+      }))
+    }
+
     if (groupsData.success) {
       // 处理分组数据
       const allGroups = groupsData.data || []
       accounts.value.claudeGroups = allGroups.filter((g) => g.platform === 'claude')
       accounts.value.geminiGroups = allGroups.filter((g) => g.platform === 'gemini')
       accounts.value.openaiGroups = allGroups.filter((g) => g.platform === 'openai')
+      accounts.value.droidGroups = allGroups.filter((g) => g.platform === 'droid')
     }
   } catch (error) {
     // console.error('加载账户列表失败:', error)
@@ -2299,6 +2486,11 @@ const getBoundAccountName = (accountId) => {
       return `分组-${openaiGroup.name}`
     }
 
+    const droidGroup = accounts.value.droidGroups.find((g) => g.id === groupId)
+    if (droidGroup) {
+      return `分组-${droidGroup.name}`
+    }
+
     // 如果找不到分组，返回分组ID的前8位
     return `分组-${groupId.substring(0, 8)}`
   }
@@ -2344,6 +2536,11 @@ const getBoundAccountName = (accountId) => {
   const bedrockAccount = accounts.value.bedrock.find((acc) => acc.id === accountId)
   if (bedrockAccount) {
     return `${bedrockAccount.name}`
+  }
+
+  const droidAccount = accounts.value.droid.find((acc) => acc.id === accountId)
+  if (droidAccount) {
+    return `${droidAccount.name}`
   }
 
   // 如果找不到，返回账户ID的前8位
@@ -2437,6 +2634,24 @@ const getBedrockBindingInfo = (key) => {
     }
     // 检查账户是否存在
     const account = accounts.value.bedrock.find((acc) => acc.id === key.bedrockAccountId)
+    if (!account) {
+      return `⚠️ ${info} (账户不存在)`
+    }
+    if (account.accountType === 'dedicated') {
+      return `🔒 专属-${info}`
+    }
+    return info
+  }
+  return ''
+}
+
+const getDroidBindingInfo = (key) => {
+  if (key.droidAccountId) {
+    const info = getBoundAccountName(key.droidAccountId)
+    if (key.droidAccountId.startsWith('group:')) {
+      return info
+    }
+    const account = accounts.value.droid.find((acc) => acc.id === key.droidAccountId)
     if (!account) {
       return `⚠️ ${info} (账户不存在)`
     }
@@ -3432,6 +3647,23 @@ const formatDate = (dateString) => {
     .replace(/\//g, '-')
 }
 
+// 格式化时间窗口倒计时
+const formatWindowTime = (seconds) => {
+  if (seconds === null || seconds === undefined) return '--:--'
+
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const secs = seconds % 60
+
+  if (hours > 0) {
+    return `${hours}h${minutes}m`
+  } else if (minutes > 0) {
+    return `${minutes}m${secs}s`
+  } else {
+    return `${secs}s`
+  }
+}
+
 // 获取每日费用进度 - 已移到 LimitProgressBar 组件中
 // const getDailyCostProgress = (key) => {
 //   if (!key.dailyCostLimit || key.dailyCostLimit === 0) return 0
@@ -3505,6 +3737,100 @@ const formatLastUsed = (dateString) => {
   return date.toLocaleDateString('zh-CN')
 }
 
+const ACCOUNT_TYPE_LABELS = {
+  claude: 'Claude',
+  openai: 'OpenAI',
+  gemini: 'Gemini',
+  droid: 'Droid',
+  deleted: '已删除',
+  other: '其他'
+}
+
+const MAX_LAST_USAGE_NAME_LENGTH = 16
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+const normalizeFrontendAccountCategory = (type) => {
+  if (!type) return 'other'
+  const lower = String(type).toLowerCase()
+  if (lower === 'claude-console' || lower === 'claude_console' || lower === 'claude') {
+    return 'claude'
+  }
+  if (
+    lower === 'openai' ||
+    lower === 'openai-responses' ||
+    lower === 'openai_responses' ||
+    lower === 'azure-openai' ||
+    lower === 'azure_openai'
+  ) {
+    return 'openai'
+  }
+  if (lower === 'gemini') {
+    return 'gemini'
+  }
+  if (lower === 'droid') {
+    return 'droid'
+  }
+  return 'other'
+}
+
+const getLastUsageInfo = (apiKey) => apiKey?.lastUsage || null
+
+const hasLastUsageAccount = (apiKey) => {
+  const info = getLastUsageInfo(apiKey)
+  return !!(info && (info.accountName || info.accountId || info.rawAccountId))
+}
+
+const isLikelyDeletedUsage = (info) => {
+  if (!info) return false
+  if (info.accountCategory === 'deleted') return true
+
+  const rawId = typeof info.rawAccountId === 'string' ? info.rawAccountId.trim() : ''
+  const accountName = typeof info.accountName === 'string' ? info.accountName.trim() : ''
+  const accountType =
+    typeof info.accountType === 'string' ? info.accountType.trim().toLowerCase() : ''
+
+  if (!rawId) return false
+
+  const looksLikeUuid = UUID_PATTERN.test(rawId)
+  const nameMissingOrSame = !accountName || accountName === rawId
+  const typeUnknown =
+    !accountType || accountType === 'unknown' || ACCOUNT_TYPE_LABELS[accountType] === undefined
+
+  return looksLikeUuid && nameMissingOrSame && typeUnknown
+}
+
+const getLastUsageBaseName = (info) => {
+  if (!info) return '未知账号'
+  if (isLikelyDeletedUsage(info)) {
+    return '已删除'
+  }
+  return info.accountName || info.accountId || info.rawAccountId || '未知账号'
+}
+
+const getLastUsageFullName = (apiKey) => getLastUsageBaseName(getLastUsageInfo(apiKey))
+
+const getLastUsageDisplayName = (apiKey) => {
+  const full = getLastUsageFullName(apiKey)
+  return full.length > MAX_LAST_USAGE_NAME_LENGTH
+    ? `${full.slice(0, MAX_LAST_USAGE_NAME_LENGTH)}...`
+    : full
+}
+
+const getLastUsageTypeLabel = (apiKey) => {
+  const info = getLastUsageInfo(apiKey)
+  if (isLikelyDeletedUsage(info)) {
+    return ACCOUNT_TYPE_LABELS.deleted
+  }
+  const category = info?.accountCategory || normalizeFrontendAccountCategory(info?.accountType)
+  return ACCOUNT_TYPE_LABELS[category] || ACCOUNT_TYPE_LABELS.other
+}
+
+const isLastUsageDeleted = (apiKey) => {
+  const info = getLastUsageInfo(apiKey)
+  return isLikelyDeletedUsage(info)
+}
+
 // 清除搜索
 const clearSearch = () => {
   searchKeyword.value = ''
@@ -3555,7 +3881,9 @@ const exportToExcel = () => {
                 ? '仅Gemini'
                 : key.permissions === 'openai'
                   ? '仅OpenAI'
-                  : key.permissions || '',
+                  : key.permissions === 'droid'
+                    ? '仅Droid'
+                    : key.permissions || '',
 
         // 限制配置
         令牌限制: key.tokenLimit === '0' || key.tokenLimit === 0 ? '无限制' : key.tokenLimit || '',
@@ -3587,6 +3915,7 @@ const exportToExcel = () => {
         OpenAI专属账户: key.openaiAccountId || '',
         'Azure OpenAI专属账户': key.azureOpenaiAccountId || '',
         Bedrock专属账户: key.bedrockAccountId || '',
+        Droid专属账户: key.droidAccountId || '',
 
         // 模型和客户端限制
         启用模型限制: key.enableModelRestriction ? '是' : '否',
@@ -3611,7 +3940,9 @@ const exportToExcel = () => {
         Token数: formatTokenCount(periodTokens),
         输入Token: formatTokenCount(periodInputTokens),
         输出Token: formatTokenCount(periodOutputTokens),
-        最后使用时间: key.lastUsedAt ? formatDate(key.lastUsedAt) : '从未使用'
+        最后使用时间: key.lastUsedAt ? formatDate(key.lastUsedAt) : '从未使用',
+        最后使用账号: getLastUsageFullName(key),
+        最后使用类型: getLastUsageTypeLabel(key)
       }
 
       // 添加分模型统计
