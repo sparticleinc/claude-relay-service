@@ -74,20 +74,30 @@ log "发现 $UPDATES 个新提交"
 log "更新内容："
 git log --oneline main..upstream/main | head -5 >> "$LOG_FILE"
 
-# 2. 合并更新
+# 2. 检查并处理VERSION文件冲突
+log "检查VERSION文件冲突..."
+if [ -f "VERSION" ] && git diff --name-only main upstream/main | grep -q "VERSION"; then
+    log "检测到VERSION文件存在冲突，优先使用上游版本"
+    # 强制使用上游的VERSION文件
+    git checkout upstream/main -- VERSION
+    git add VERSION
+    log "已采用上游VERSION文件: $(cat VERSION)"
+fi
+
+# 3. 合并更新
 log "合并上游更新..."
 # 使用 --no-ff 确保创建合并提交，--no-edit 使用默认消息
 git merge upstream/main -m "auto: 同步上游版本更新" --no-edit --no-ff
 
-# 3. 获取版本号
+# 4. 获取版本号
 VERSION=$(cat VERSION)
 log "当前版本: $VERSION"
 
-# 4. 构建镜像
+# 5. 构建镜像
 log "构建 Docker 镜像..."
 podman build -t gptbasesparticle/claude-relay-service:v$VERSION -t gptbasesparticle/claude-relay-service:latest . >> "$LOG_FILE" 2>&1
 
-# 5. 推送到 Docker Hub
+# 6. 推送到 Docker Hub
 log "推送镜像到 Docker Hub..."
 # 确保已登录
 if ! podman login --get-login docker.io >/dev/null 2>&1; then
@@ -112,7 +122,7 @@ fi
 podman push gptbasesparticle/claude-relay-service:v$VERSION >> "$LOG_FILE" 2>&1
 podman push gptbasesparticle/claude-relay-service:latest >> "$LOG_FILE" 2>&1
 
-# 6. 部署到服务器
+# 7. 部署到服务器
 log "部署到服务器..."
 ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@cc-relay.gbase.ai << 'EOF' >> "$LOG_FILE" 2>&1
     cd ~/claude-relay-deployment
@@ -122,7 +132,7 @@ ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no ubuntu@cc-relay.gbase.ai <<
     sudo docker-compose ps
 EOF
 
-# 7. 验证部署
+# 8. 验证部署
 log "验证部署..."
 sleep 15
 DEPLOYED_VERSION=$(curl -s https://cc-relay.gbase.ai/health | jq -r '.version')
@@ -133,7 +143,7 @@ else
     exit 1
 fi
 
-# 8. 推送到公司仓库
+# 9. 推送到公司仓库
 log "推送到公司仓库..."
 git push origin main >> "$LOG_FILE" 2>&1
 
