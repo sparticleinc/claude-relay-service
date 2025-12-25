@@ -1231,10 +1231,32 @@ router.get('/health', async (req, res) => {
   try {
     const healthStatus = await claudeRelayService.healthCheck()
 
+    // 获取版本号
+    let version = process.env.APP_VERSION || process.env.VERSION
+    if (!version) {
+      try {
+        const versionFile = require('path').join(__dirname, '..', '..', 'VERSION')
+        const fs = require('fs')
+        if (fs.existsSync(versionFile)) {
+          version = fs.readFileSync(versionFile, 'utf8').trim()
+        }
+      } catch (error) {
+        // 忽略错误
+      }
+    }
+    if (!version) {
+      try {
+        const { version: pkgVersion } = require('../../package.json')
+        version = pkgVersion
+      } catch (error) {
+        version = '1.0.0'
+      }
+    }
+
     res.status(healthStatus.healthy ? 200 : 503).json({
       status: healthStatus.healthy ? 'healthy' : 'unhealthy',
       service: 'claude-relay-service',
-      version: '1.0.0',
+      version,
       ...healthStatus
     })
   } catch (error) {
