@@ -81,13 +81,15 @@ if [ -f "VERSION" ] && git diff --name-only main upstream/main | grep -q "VERSIO
     # 强制使用上游的VERSION文件
     git checkout upstream/main -- VERSION
     git add VERSION
+    git commit -m "chore: sync VERSION file with upstream [skip ci]" --no-edit
     log "已采用上游VERSION文件: $(cat VERSION)"
 fi
 
 # 3. 合并更新
 log "合并上游更新..."
 # 使用 --no-ff 确保创建合并提交，--no-edit 使用默认消息
-git merge upstream/main -m "auto: 同步上游版本更新" --no-edit --no-ff
+# 使用 -X theirs 策略，在有冲突时优先使用上游版本
+git merge upstream/main -X theirs -m "auto: 同步上游版本更新" --no-edit --no-ff
 
 # 4. 获取版本号
 VERSION=$(cat VERSION)
