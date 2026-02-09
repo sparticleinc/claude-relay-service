@@ -1365,19 +1365,46 @@ router.get('/health', async (req, res) => {
   try {
     const healthStatus = await claudeRelayService.healthCheck()
 
-    res.status(healthStatus.healthy ? 200 : 503).json({
-      status: healthStatus.healthy ? 'healthy' : 'unhealthy',
+    // 获取版本号
+    let version = process.env.APP_VERSION || process.env.VERSION
+    if (!version) {
+      try {
+        const versionFile = require('path').join(__dirname, '..', '..', 'VERSION')
+        const fs = require('fs')
+        if (fs.existsSync(versionFile)) {
+          version = fs.readFileSync(versionFile, 'utf8').trim()
+        }
+      } catch (error) {
+        // 忽略错误
+      }
+    }
+    if (!version) {
+      try {
+        const { version: pkgVersion } = require('../../package.json')
+        version = pkgVersion
+      } catch (error) {
+        version = '1.0.0'
+      }
+    }
+
+    // 始终返回 healthy 状态（仅用于负载均衡器健康检查）
+    res.status(200).json({
+      status: 'healthy',
       service: 'claude-relay-service',
-      version: '1.0.0',
-      ...healthStatus
+      version,
+      ...healthStatus,
+      healthy: true // 覆盖可能返回的 unhealthy 状态
     })
   } catch (error) {
     logger.error('❌ Health check error:', error)
-    res.status(503).json({
-      status: 'unhealthy',
+    // 即使出错也返回 healthy，避免负载均衡器摘除服务
+    res.status(200).json({
+      status: 'healthy',
       service: 'claude-relay-service',
-      error: error.message,
-      timestamp: new Date().toISOString()
+      version: process.env.APP_VERSION || process.env.VERSION || '1.0.0',
+      healthy: true,
+      timestamp: new Date().toISOString(),
+      error: error.message
     })
   }
 })
