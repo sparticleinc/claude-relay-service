@@ -2119,6 +2119,13 @@ class ClaudeAccountService {
           organizationType: profileData.organization?.organization_type
         })
 
+        const organizationType = String(
+          profileData.organization?.organization_type || ''
+        ).toLowerCase()
+        const isEnterpriseOrg = organizationType === 'claude_enterprise'
+        const hasClaudeMax = profileData.account?.has_claude_max === true || isEnterpriseOrg
+        const hasClaudePro = profileData.account?.has_claude_pro === true && !hasClaudeMax
+
         // 构建订阅信息
         const subscriptionInfo = {
           // 账号信息
