@@ -257,3 +257,5 @@ docs/aws-deployment/weekly-update-guide.md
 
 update-service.sh
 .env.local
+
+.serena/
