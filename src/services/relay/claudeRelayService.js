@@ -1070,6 +1070,10 @@ class ClaudeRelayService {
     // 移除cache_control中的ttl字段
     this._stripTtlFromCacheControl(processedBody)
 
+    // 修复 clear_thinking_20251015 策略：该策略要求 thinking 为 enabled 或 adaptive
+    // 当 Claude Code 从有 thinking blocks 的会话切换到无 thinking 的模式时会触发此问题
+    this._fixClearThinkingStrategy(processedBody)
+
     // 判断是否是真实的 Claude Code 请求
     const isRealClaudeCode = this.isRealClaudeCodeRequest(processedBody)
 
@@ -1302,6 +1306,40 @@ class ClaudeRelayService {
           processContentArray(message.content)
         }
       })
+    }
+  }
+
+  // 🔧 修复 clear_thinking_20251015 策略兼容性问题
+  // 该策略用于清除前一轮的 thinking budget，要求 thinking 为 enabled 或 adaptive
+  // 当从有 thinking 的会话（如 opus 模型）切换到无 thinking 模式时，Claude Code 会发送此策略
+  // 修复：自动将 thinking 设置为 adaptive，满足 API 要求
+  _fixClearThinkingStrategy(body) {
+    if (!body || typeof body !== 'object') {
+      return
+    }
+
+    const budgetTokens = body.budget_tokens
+    if (!budgetTokens || typeof budgetTokens !== 'object') {
+      return
+    }
+
+    const strategy = budgetTokens.strategy
+    if (strategy !== 'clear_thinking_20251015') {
+      return
+    }
+
+    const thinking = body.thinking
+    const thinkingType =
+      thinking && typeof thinking === 'object' ? thinking.type : null
+    const isThinkingActive = thinkingType === 'enabled' || thinkingType === 'adaptive'
+
+    if (!isThinkingActive) {
+      // thinking 未启用，但请求使用了 clear_thinking_20251015 策略
+      // 设置为 adaptive 模式以满足 API 要求（adaptive 按需使用 thinking，性能影响最小）
+      body.thinking = { type: 'adaptive' }
+      logger.debug(
+        '🔧 Fixed clear_thinking_20251015: set thinking=adaptive to satisfy API requirement'
+      )
     }
   }
 
