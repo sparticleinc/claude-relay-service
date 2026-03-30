@@ -17,6 +17,7 @@ const { createClaudeTestPayload } = require('../../utils/testPayloadHelper')
 const userMessageQueueService = require('../userMessageQueueService')
 const { isStreamWritable } = require('../../utils/streamHelper')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
+const metadataUserIdHelper = require('../../utils/metadataUserIdHelper')
 const {
   getHttpsAgentForStream,
   getHttpsAgentForNonStream,
@@ -188,6 +189,16 @@ class ClaudeRelayService {
       lower.includes('only authorized for use with claude code') ||
       lower.includes('cannot be used for other api requests')
     )
+  }
+
+  // 💰 检查是否为 "Extra usage required" 的非限流 429
+  // Anthropic 对未开启 Extra Usage 的账户请求长上下文模型时返回此错误
+  // 这不是真正的限流，不应标记账户为 rate limited
+  _isExtraUsageRequired429(statusCode, body) {
+    if (statusCode !== 429) return false
+    const message = this._extractErrorMessage(body)
+    if (!message) return false
+    return message.toLowerCase().includes('extra usage')
   }
 
   _toPascalCaseToolName(name) {
@@ -756,41 +767,48 @@ class ClaudeRelayService {
         }
         // 检查是否为429状态码
         else if (response.statusCode === 429) {
-          const resetHeader = response.headers
-            ? response.headers['anthropic-ratelimit-unified-reset']
-            : null
-          const parsedResetTimestamp = resetHeader ? parseInt(resetHeader, 10) : NaN
-
-          if (isOpusModelRequest && !Number.isNaN(parsedResetTimestamp)) {
-            await claudeAccountService.markAccountOpusRateLimited(accountId, parsedResetTimestamp)
-            logger.warn(
-              `🚫 Account ${accountId} hit Opus limit, resets at ${new Date(parsedResetTimestamp * 1000).toISOString()}`
+          // 💰 先检查是否为 "Extra usage required" 的非限流 429
+          if (this._isExtraUsageRequired429(response.statusCode, response.body)) {
+            logger.info(
+              `💰 [Non-Stream] "Extra usage required" 429 for account ${accountId}, skipping rate limit marking`
             )
-
-            if (isDedicatedOfficialAccount) {
-              const limitMessage = this._buildOpusLimitMessage(parsedResetTimestamp)
-              return {
-                statusCode: 403,
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  error: 'opus_weekly_limit',
-                  message: limitMessage
-                }),
-                accountId
-              }
-            }
           } else {
-            isRateLimited = true
-            if (!Number.isNaN(parsedResetTimestamp)) {
-              rateLimitResetTimestamp = parsedResetTimestamp
-              logger.info(
-                `🕐 Extracted rate limit reset timestamp: ${rateLimitResetTimestamp} (${new Date(rateLimitResetTimestamp * 1000).toISOString()})`
+            const resetHeader = response.headers
+              ? response.headers['anthropic-ratelimit-unified-reset']
+              : null
+            const parsedResetTimestamp = resetHeader ? parseInt(resetHeader, 10) : NaN
+
+            if (isOpusModelRequest && !Number.isNaN(parsedResetTimestamp)) {
+              await claudeAccountService.markAccountOpusRateLimited(accountId, parsedResetTimestamp)
+              logger.warn(
+                `🚫 Account ${accountId} hit Opus limit, resets at ${new Date(parsedResetTimestamp * 1000).toISOString()}`
               )
-            }
-            if (isDedicatedOfficialAccount) {
-              dedicatedRateLimitMessage = this._buildStandardRateLimitMessage(
-                rateLimitResetTimestamp || account?.rateLimitEndAt
-              )
+
+              if (isDedicatedOfficialAccount) {
+                const limitMessage = this._buildOpusLimitMessage(parsedResetTimestamp)
+                return {
+                  statusCode: 403,
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    error: 'opus_weekly_limit',
+                    message: limitMessage
+                  }),
+                  accountId
+                }
+              }
+            } else {
+              isRateLimited = true
+              if (!Number.isNaN(parsedResetTimestamp)) {
+                rateLimitResetTimestamp = parsedResetTimestamp
+                logger.info(
+                  `🕐 Extracted rate limit reset timestamp: ${rateLimitResetTimestamp} (${new Date(rateLimitResetTimestamp * 1000).toISOString()})`
+                )
+              }
+              if (isDedicatedOfficialAccount) {
+                dedicatedRateLimitMessage = this._buildStandardRateLimitMessage(
+                  rateLimitResetTimestamp || account?.rateLimitEndAt
+                )
+              }
             }
           }
         } else {
@@ -1177,18 +1195,52 @@ class ClaudeRelayService {
 
   // 🔄 替换请求中的客户端标识
   _replaceClientId(body, unifiedClientId) {
-    if (!body || !body.metadata || !body.metadata.user_id || !unifiedClientId) {
+    if (!body?.metadata?.user_id || !unifiedClientId) {
       return
     }
 
-    const userId = body.metadata.user_id
-    // user_id格式：user_{64位十六进制}_account__session_{uuid}
-    // 只替换第一个下划线后到_account之前的部分（客户端标识）
-    const match = userId.match(/^user_[a-f0-9]{64}(_account__session_[a-f0-9-]{36})$/)
-    if (match && match[1]) {
-      // 替换客户端标识部分
-      body.metadata.user_id = `user_${unifiedClientId}${match[1]}`
-      logger.info(`🔄 Replaced client ID with unified ID: ${body.metadata.user_id}`)
+    const parsed = metadataUserIdHelper.parse(body.metadata.user_id)
+    if (!parsed) {
+      return
+    }
+
+    body.metadata.user_id = metadataUserIdHelper.build({
+      ...parsed,
+      deviceId: unifiedClientId
+    })
+    logger.info(`🔄 Replaced client ID with unified ID: ${body.metadata.user_id}`)
+  }
+
+  // 🧹 移除 billing header 系统提示元素
+  _removeBillingHeaderFromSystem(processedBody) {
+    if (!processedBody || !processedBody.system) {
+      return
+    }
+
+    if (typeof processedBody.system === 'string') {
+      if (processedBody.system.trim().startsWith('x-anthropic-billing-header')) {
+        logger.debug('🧹 Removed billing header from string system prompt')
+        delete processedBody.system
+      }
+      return
+    }
+
+    if (Array.isArray(processedBody.system)) {
+      const originalLength = processedBody.system.length
+      processedBody.system = processedBody.system.filter(
+        (item) =>
+          !(
+            item &&
+            item.type === 'text' &&
+            typeof item.text === 'string' &&
+            item.text.trim().startsWith('x-anthropic-billing-header')
+          )
+      )
+      if (processedBody.system.length < originalLength) {
+        logger.debug(
+          `🧹 Removed ${originalLength - processedBody.system.length} billing header element(s) from system array`
+        )
+      }
     }
   }
 
@@ -1532,15 +1584,24 @@ class ClaudeRelayService {
     const contentLength = Buffer.byteLength(bodyString, 'utf8')
 
     // 构建最终请求头（包含认证、版本、User-Agent、Beta 等）
+    // Force identity encoding to prevent upstream (Cloudflare) from returning
+    // gzip-compressed responses without a Content-Encoding header, which causes
+    // binary data to be silently corrupted by UTF-8 text decoding in the stream
+    // handler. See: https://github.com/Wei-Shaw/claude-relay-service/issues/1030
     const headers = {
       host: 'api.anthropic.com',
       connection: 'keep-alive',
       'content-type': 'application/json',
       'content-length': String(contentLength),
+      'accept-encoding': 'identity',
       authorization: `Bearer ${accessToken}`,
       'anthropic-version': this.apiVersion,
       ...finalHeaders
     }
+
+    // 强制 identity 编码：finalHeaders 可能携带客户端或 Redis 缓存中的 accept-encoding（如 zstd），
+    // 必须在 spread 后覆盖回 identity，因为 https.request 的手动解压只支持 gzip/deflate
+    headers['accept-encoding'] = 'identity'
 
     // 使用统一 User-Agent 或客户端提供的，最后使用默认值
     const userAgent = unifiedUA || headers['user-agent'] || 'claude-cli/1.0.119 (external, cli)'
@@ -2073,6 +2134,61 @@ class ClaudeRelayService {
         // 错误响应处理
         if (res.statusCode !== 200) {
           if (res.statusCode === 429) {
+            // 💰 先读取完整 body 以区分 "Extra usage required" 和真正的限流
+            const bodyChunks429 = []
+            await new Promise((resolveBody) => {
+              res.on('data', (chunk) => bodyChunks429.push(chunk))
+              res.on('end', resolveBody)
+              res.on('error', resolveBody)
+            })
+            const errorBody429 = Buffer.concat(bodyChunks429).toString()
+
+            // 检查是否为 "Extra usage required" 的非限流 429
+            if (this._isExtraUsageRequired429(res.statusCode, errorBody429)) {
+              logger.info(
+                `💰 [Stream] "Extra usage required" 429 for account ${accountId}, skipping rate limit marking`
+              )
+              logger.error(
+                `❌ Claude API returned error status: 429 | Account: ${account?.name || accountId}`
+              )
+              logger.error(
+                `❌ Claude API error response (Account: ${account?.name || accountId}):`,
+                errorBody429
+              )
+              if (isStreamWritable(responseStream)) {
+                let errorMessage = `Claude API error: 429`
+                try {
+                  const parsedError = JSON.parse(errorBody429)
+                  if (parsedError.error?.message) {
+                    errorMessage = parsedError.error.message
+                  } else if (parsedError.message) {
+                    errorMessage = parsedError.message
+                  }
+                } catch {
+                  // 使用默认错误消息
+                }
+                if (toolNameStreamTransformer) {
+                  responseStream.write(
+                    `data: ${JSON.stringify({ type: 'error', error: errorMessage })}\n\n`
+                  )
+                } else {
+                  responseStream.write('event: error\n')
+                  responseStream.write(
+                    `data: ${JSON.stringify({
+                      error: 'Claude API error',
+                      status: 429,
+                      details: errorBody429,
+                      timestamp: new Date().toISOString()
+                    })}\n\n`
+                  )
+                }
+                responseStream.end()
+              }
+              reject(new Error(`Claude API error: 429`))
+              return
+            }
+
+            // 真正的限流处理
             const resetHeader = res.headers
               ? res.headers['anthropic-ratelimit-unified-reset']
               : null
@@ -2102,7 +2218,6 @@ class ClaudeRelayService {
                   })
                 )
                 responseStream.end()
-                res.resume()
                 resolve()
                 return
               }
@@ -2141,11 +2256,50 @@ class ClaudeRelayService {
                   })
                 )
                 responseStream.end()
-                res.resume()
                 resolve()
                 return
               }
             }
+
+            // 非专属账户的真正限流：透传错误给客户端（body 已读完，无需 fall-through）
+            logger.error(
+              `❌ Claude API returned error status: 429 | Account: ${account?.name || accountId}`
+            )
+            logger.error(
+              `❌ Claude API error response (Account: ${account?.name || accountId}):`,
+              errorBody429
+            )
+            if (isStreamWritable(responseStream)) {
+              let errorMessage = `Claude API error: 429`
+              try {
+                const parsedError = JSON.parse(errorBody429)
+                if (parsedError.error?.message) {
+                  errorMessage = parsedError.error.message
+                } else if (parsedError.message) {
+                  errorMessage = parsedError.message
+                }
+              } catch {
+                // 使用默认错误消息
+              }
+              if (toolNameStreamTransformer) {
+                responseStream.write(
+                  `data: ${JSON.stringify({ type: 'error', error: errorMessage })}\n\n`
+                )
+              } else {
+                responseStream.write('event: error\n')
+                responseStream.write(
+                  `data: ${JSON.stringify({
+                    error: 'Claude API error',
+                    status: 429,
+                    details: errorBody429,
+                    timestamp: new Date().toISOString()
+                  })}\n\n`
+                )
+              }
+              responseStream.end()
+            }
+            reject(new Error(`Claude API error: 429`))
+            return
           }
 
           // 🔄 403 重试机制（必须在设置 res.on('data')/res.on('end') 之前处理）
@@ -2919,13 +3073,14 @@ class ClaudeRelayService {
         `⏱️ ${prefix}${isTimeout ? 'Timeout' : 'Server'} error for account ${accountId}, error count: ${errorCount}/${threshold}`
       )
 
-      // 标记账户为临时不可用（5分钟）
+      // 标记账户为临时不可用（TTL 由 upstreamError 配置决定）
       try {
         await unifiedClaudeScheduler.markAccountTemporarilyUnavailable(
           accountId,
           accountType,
           sessionHash,
-          300
+          null,
+          statusCode
         )
       } catch (markError) {
         logger.error(`❌ Failed to mark account temporarily unavailable: ${accountId}`, markError)
